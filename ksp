@@ -1,0 +1,286 @@
+#!/bin/bash
+# /etc/init.d/ksp
+# version 2014-08-16 (YYYY-MM-DD)
+
+### BEGIN INIT INFO
+# Provides: ksp
+# Required-Start: $local_fs $remote_fs
+# Required-Stop: $local_fs $remote_fs
+# Should-Start: $network
+# Should-Stop: $network
+# Default-Start: 2 3 4 5
+# Default-Stop: 0 1 6
+# Short-Description: ksp server
+# Description: Starts the DMP server
+### END INIT INFO
+
+# kksp-init-script - An initscript to start KSP
+# Copyright (C) 2015 Marco Scirea <marco.prolog@gmail.com>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+# Source the function library
+## CentOS/Fedora
+if [ -f /etc/rc.d/init.d/functions ]
+ then
+ . /etc/rc.d/init.d/functions
+fi
+## Ubuntu
+if [ -f /lib/lsb/init-functions ]
+ then
+ . /lib/lsb/init-functions
+fi
+
+<<COMMENT
+## ---------------------------------------------------------
+## copy between these lines and place them at /etc/default/minecraft
+## do not include the <<COMMENT and COMMENT words
+
+## Settings for ksp-init-script
+
+# Nice looking name of service for script to report back to users
+SERVERNAME="DMPS"
+
+# Filename of server binary
+SERVICE="DMPServer.exe"
+
+# Username of non-root user who will run the server
+USERNAME="ksp"
+
+# Path of server binary and world
+KSPPATH="/home/ksp/DMPS"
+
+# Name of Screen session
+SCRNAME="ksp"
+
+SETTINGS_FILE_WORKING="1"
+## End of settings file
+## ---------------------------------------------------------
+COMMENT
+
+### ### ### ### ### ### ### ### ### ### ### ### ### ###
+### You shouldn't need to edit anything below here! ###
+### ### ### ### ### ### ### ### ### ### ### ### ### ###
+
+## Apply the settings file
+
+# define the location of the settings file from the name of this script
+SETTINGSFILE="/etc/default/$(basename $0)"
+
+# check the file exists, and fail if not
+if [ ! -f "$SETTINGSFILE" ]
+ then
+ echo " * [ERROR] Settings file $SETTINGSFILE does not exist. Can't run!"
+ exit 1;
+fi
+
+# if exists so source it
+. "$SETTINGSFILE"
+
+# if the settings are not applying for some reason, then fail
+if [ ! "$SETTINGS_FILE_WORKING" == "1" ]
+ then
+ echo " * [ERROR] Settings file $SETTINGSFILE is not applying. Can't run!"
+ echo " Check your options are uncommented and you haven't copied the <<COMMENT block."
+ exit 1;
+fi
+
+# Find the port number from the existing server file
+SERVERPORT="$(grep -E 'port=' $KSPPATH/Config/Settings.txt | sed -e s/.*port=//)"
+
+INVOCATION="mono $SERVICE"
+
+## Runs all commands as the non-root user
+
+as_user() {
+  ME="$(whoami)"
+  if [ "$ME" == "$USERNAME" ]
+  then
+    bash -c "$1"
+  else
+    su - "$USERNAME" -c "$1"
+  fi
+}
+
+## Check if the server is running or not, and get the Process ID if it is
+
+server_running() {
+  # Get the PID of the running Screen session:
+  # ps, remove grep, look for screen, look for the screen session $SCRNAME to differentiate between multiple servers, awk out everything but the pid
+  SCREENPID=""
+  SCREENPID="$(ps -ef | grep -v grep | grep -i screen | grep $SCRNAME | awk '{print $2}')"
+  # if the screen session with $SCRNAME is not running, then the server is not running, so we return 1 and exit the function
+  if [ -z "$SCREENPID" ]
+  then
+   return 1
+  fi
+  # PID="$(ps -ef | grep -v grep | grep -i screen | grep $SCRNAME | awk '{print $2}' | xargs ps -f --ppid | grep $SERVICE | awk '{print $2}')"
+  # use the screen session pid to get the parent pid, which is the actual pid of the java process, check that process is actually $SERVICE
+  PID="$(ps -f --ppid $SCREENPID | grep $SERVICE | awk '{print $2}')"
+  # if the java process is not running, then the server is not running, so we return 1 to exit the function
+  if [ -z "$PID" ]
+  then
+    return 1
+  fi
+  # if we haven't failed those two tests, we have a running server, so we return success
+  return 0
+}
+
+## Start the server executable as a service
+
+mc_start() {
+  if server_running
+  then
+    echo " * [ERROR] $SERVERNAME was already running (pid $PID). Not starting!"
+    exit 1
+  else
+    echo " * $SERVERNAME was not already running. Starting..."
+    as_user "cd \"$KSPPATH\" && screen -c /dev/null -dmS $SCRNAME $INVOCATION"
+    echo " * Checking $SERVERNAME is running..."
+
+    # start a counter and check for 15 seconds if the server is running or not
+    COUNT=0
+    while [ $COUNT -lt 15 ]; do
+      if server_running
+      then
+        echo " * [OK] $SERVERNAME is now running (pid $PID)."
+	exit 0
+      else
+        let COUNT=COUNT+1
+        sleep 1
+      fi
+    done
+    # if we've reached here, the server hasn't started in 15 seconds
+    echo " * [ERROR] Could not start $SERVERNAME."
+    exit 1
+  fi
+}
+
+## Stop the executable
+
+mc_stop() {
+  if server_running
+  then
+    echo " * $SERVERNAME is running (pid $PID). Commencing shutdown..."
+    echo " * Notifying users of shutdown..."
+    as_user "screen -p 0 -S $SCRNAME -X eval 'stuff \"/say SERVER SHUTTING DOWN IN 10 SECONDS.\"\015'"
+
+    # start a counter and check for 10 seconds
+    COUNT=0
+    while [ $COUNT -lt 10 ]; do
+      echo -n "."
+      sleep 1
+      let COUNT=COUNT+1
+    done
+    echo ""
+
+    echo -n " * Stopping $SERVERNAME"
+    as_user "screen -p 0 -S $SCRNAME -X eval 'stuff \"/quit\"\015'"
+
+    # start a counter and check for 15 seconds if the server is running or not
+    COUNT=0
+    while [ $COUNT -lt 15 ]; do
+      if server_running
+      then
+        echo -n "."
+        let COUNT=COUNT+1
+        sleep 1
+      else
+        echo ""
+        echo " * [OK] $SERVERNAME is shut down."
+        exit 0
+      fi
+    done
+    echo ""
+    # if we've reached here, the server hasn't stopped in 15 seconds
+    echo " * [ERROR] $SERVERNAME is still running (pid $PID). Could not be shutdown!"
+    exit 1
+  else
+    echo " * [OK] $SERVERNAME is shut down."
+  fi
+}
+
+## Check if server is running and display PID
+
+mc_status() {
+  if server_running
+  then
+    echo " * $SERVERNAME status: Running (pid $PID)."
+  else
+    echo " * $SERVERNAME status: Not running."
+    exit 1
+  fi
+}
+
+## Display some extra environment informaton
+
+mc_info() {
+  if server_running
+  then
+    RSS="$(ps --pid $PID --format rss | grep -v RSS)"
+    echo " - Start Command      : $INVOCATION"
+    echo " - Server Path        : $KSPPATH"
+    echo " - Process ID         : $PID"
+    echo " - Screen Session     : $SCRNAME"
+    echo " - Memory Usage       : $((RSS/1024)) Mb ($RSS kb)"
+    echo " - Active Connections : "
+    netstat --inet -tna | grep -E "Proto|$SERVERPORT"
+  else
+    echo " * $SERVERNAME is not running. Unable to give info."
+    exit 1
+  fi
+}
+ 
+## Connect to the active Screen session, disconnect with Ctrl+a then d
+
+mc_console() {
+  if server_running
+  then
+    as_user "screen -S $SCRNAME -dr"
+  else
+    echo " * [ERROR] $SERVERNAME was not running! Unable to console."
+    exit 1
+  fi
+}
+
+## These are the parameters passed to the script
+
+case "$1" in
+  start)
+ mc_start
+ ;;
+  stop)
+ mc_stop
+ ;;
+  restart)
+ mc_stop
+ sleep 1
+ mc_start
+ ;;
+  status)
+ mc_status
+ ;;
+  info)
+ mc_info
+ ;;
+  console)
+ mc_console
+ ;;
+  *)
+ echo " * Usage: ksp {start|stop|restart|status|info|console}"
+ exit 1
+ ;;
+esac
+
+exit 0
